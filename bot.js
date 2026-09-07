@@ -1,30 +1,5 @@
-
-/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Bot · JS
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const fs = require('fs').promises;
 const path = require('path');
 const { exec } = require('child_process');
@@ -32,6 +7,7 @@ const util = require('util');
 const execPromise = util.promisify(exec);
  
 const { fetchProductResearch, analyzeThoughtMemo } = require('./researcher');
+const { scanActiveProjects } = require('./ship_target_analyzer');
  
 // ==========================================
 // ⚙️ 設定エリア
@@ -39,8 +15,9 @@ const { fetchProductResearch, analyzeThoughtMemo } = require('./researcher');
 const TOKEN = process.env.DISCORD_TOKEN;
 const MEMO_CHANNEL_ID = process.env.MEMO_CHANNEL_ID;
 const RESEARCH_CHANNEL_ID = process.env.RESEARCH_CHANNEL_ID;
+const PROMPTER_PORT = process.env.PROMPTER_PORT || '3333';
  
-const VAULT_ROOT_DIR = '/home/tnuma/my-vault';
+const VAULT_ROOT_DIR = process.env.VAULT_PATH || '/home/tnuma/my-vault';
 const MEMO_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox');
 const RESEARCH_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox/Nanshindo');
 // ==========================================
@@ -169,7 +146,58 @@ client.once('clientReady', () => {
  
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
- 
+
+    // ----------------------------------------------------
+    // 🎬 プロンプター起動コマンド (!prompter / /prompter / プロンプター)
+    // ----------------------------------------------------
+    const trimmed = (message.content || '').trim().toLowerCase();
+    if (trimmed === '!prompter' || trimmed === '/prompter' || trimmed === 'プロンプター' || trimmed === '!teleprompter') {
+        try {
+            const activeProjects = scanActiveProjects(VAULT_ROOT_DIR);
+            const readyList = activeProjects.filter(p => p.status === 'ready');
+            const inProdList = activeProjects.filter(p => p.status === 'in-production');
+
+            const baseUrl = `http://pi4.local:${PROMPTER_PORT}`;
+            const fields = [];
+
+            if (readyList.length > 0) {
+                const links = readyList.map(p => {
+                    const projectKey = p.relPath.replace(/\/[^/]+$/, '');
+                    return `• **[${p.title}](${baseUrl}/p/${encodeURIComponent(projectKey)})** (${p.channelName} / ready ${p.ageDays}日)`;
+                }).join('\n');
+                fields.push({ name: '🎯 収録待ちの台本 (ready)', value: links });
+            }
+
+            if (inProdList.length > 0) {
+                const links = inProdList.slice(0, 3).map(p => {
+                    const projectKey = p.relPath.replace(/\/[^/]+$/, '');
+                    return `• **[${p.title}](${baseUrl}/p/${encodeURIComponent(projectKey)})** (${p.channelName} / 制作中 ${p.ageDays}日)`;
+                }).join('\n');
+                fields.push({ name: '⚡ 制作進行中の案件 (in-production)', value: links });
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('🎬 Web Teleprompter')
+                .setDescription(`タップするとスマホのブラウザで全画面プロンプターが起動します。\n一覧画面: [**案件リストを開く**](${baseUrl})`)
+                .setColor(readyList.length > 0 ? 0x10b981 : 0x3498db)
+                .setFooter({ text: '自動スクロール・速度調整・文字サイズ変更対応' })
+                .setTimestamp();
+
+            if (fields.length > 0) {
+                embed.addFields(fields);
+            } else {
+                embed.addFields({ name: 'お知らせ', value: '現在 ready または in-production の案件はありません。' });
+            }
+
+            await message.reply({ embeds: [embed] });
+            return;
+        } catch (err) {
+            console.error('Prompter command error:', err);
+            await message.reply('⚠️ プロンプターURLの生成中にエラーが発生しました。');
+            return;
+        }
+    }
+
     // ----------------------------------------------------
     // ① 文房具リサーチ
     // ----------------------------------------------------

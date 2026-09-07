@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "notify:review": "node weekly_review_notifier.js",
-    "nudge:ship": "node daily_ship_nudge.js"
+    "nudge:ship": "node daily_ship_nudge.js",
+    "prompter": "node prompter_server.js"
   },
   "keywords": [],
   "author": "",

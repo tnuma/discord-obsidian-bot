@@ -61,6 +61,8 @@ const args = process.argv.slice(2);
 const IS_DRY_RUN = args.includes('--dry-run');
 const NO_PULL = args.includes('--no-pull');
 
+const PROMPTER_PORT = process.env.PROMPTER_PORT || '3333';
+
 // Vaultを最新に pull
 function syncVault() {
     if (NO_PULL) {
@@ -112,16 +114,20 @@ async function main() {
             if (target.readyProjects.length > 0) {
                 lines.push('🔥 **確定済み・あとは出すだけ (ready):**');
                 target.readyProjects.forEach(p => {
+                    const projectKey = p.relPath.replace(/\/[^/]+$/, '');
                     lines.push(`  • **『${p.title}』** (${p.ageDays}日待機)`);
                     lines.push(`    👉 今日の ${target.slot.timeRange} 公開を狙い、朝の作業で最終チェック・Shipしましょう！`);
+                    lines.push(`    📱 [プロンプターを開く](http://pi4.local:${PROMPTER_PORT}/p/${encodeURIComponent(projectKey)})`);
                 });
             }
 
             if (target.inProdProjects.length > 0) {
                 lines.push('⚡ **制作進行中・今日仕上げ推奨 (in-production):**');
                 target.inProdProjects.forEach(p => {
+                    const projectKey = p.relPath.replace(/\/[^/]+$/, '');
                     lines.push(`  • **『${p.title}』** (${p.ageDays}日目)`);
                     lines.push(`    👉 今夜のゴールデンタイム（${target.slot.timeRange}）公開を目指して、朝の作業で一歩進めましょう！`);
+                    lines.push(`    📱 [台本プレビュー](http://pi4.local:${PROMPTER_PORT}/p/${encodeURIComponent(projectKey)})`);
                 });
             }
 
@@ -149,7 +155,10 @@ async function main() {
         allReady.push(...otherActive.filter(p => p.status === 'ready'));
 
         if (allReady.length > 0) {
-            const readyLines = allReady.map(p => `• **[${p.channelName}] 『${p.title}』** (${p.ageDays}日待機)`).join('\n');
+            const readyLines = allReady.map(p => {
+                const projectKey = p.relPath.replace(/\/[^/]+$/, '');
+                return `• **[${p.channelName}] 『${p.title}』** (${p.ageDays}日待機) → [🎬 プロンプター](http://pi4.local:${PROMPTER_PORT}/p/${encodeURIComponent(projectKey)})`;
+            }).join('\n');
             fields.push({
                 name: '🎯 収録・公開待ちの案件 (ready)',
                 value: readyLines + '\n*迷ったら一番上の案件を撮る・進めるのが最優先です。*'
