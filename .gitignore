@@ -1,3 +1,5 @@
 .env
 node_modules/
 quick_memo_bot.js
+.last_review_state.json
+*.log
