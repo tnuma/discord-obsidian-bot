@@ -110,16 +110,19 @@ function scanVaultStatus(now, channels, stalledTasks) {
   });
 }
  
-// 00_Inbox 配下のメモ一覧走査（再帰）。
-// 2026-09-04 改修: 従来は00_Inbox直下しか見ておらず、00_Inbox/Nanshindo のようなBot下書きが
-// 滞留検知から漏れていた。status付きファイルは01_Projectsと同じ基準で滞留判定し、
-// statusなしの通常思考メモは従来通りdate基準で「賞味期限切れ」判定する。
+// 00_Inbox 配下の通常思考メモ走査（brewing フォルダは除外）。
 function getInboxMemos(now, channels, stalledTasks) {
   const inboxDir = path.join(VAULT_PATH, '00_Inbox');
-  const allFiles = getAllMarkdownFiles(inboxDir).filter(f => path.basename(f) !== 'NEXT_PITCH.md');
- 
+  const allFiles = getAllMarkdownFiles(inboxDir).filter(f => {
+    const base = path.basename(f);
+    if (base === 'NEXT_PITCH.md') return false;
+    // brewing フォルダ配下の未発酵メモは除外（getBrewingMemos で別途管理）
+    if (f.includes('/00_Inbox/brewing/') || f.includes('\\00_Inbox\\brewing\\')) return false;
+    return true;
+  });
+
   const plainMemos = [];
- 
+
   allFiles.forEach(filePath => {
     let data = null;
     try {
@@ -128,13 +131,13 @@ function getInboxMemos(now, channels, stalledTasks) {
     } catch (e) {
       return; // パース失敗はスキップ
     }
- 
+
     if (data && data.status) {
       // status付き（南信堂Bot下書き等）＝ 01_Projectsと同じ滞留基準を適用
       classifyStatusFile(filePath, data, now, channels, stalledTasks);
       return;
     }
- 
+
     // statusなし＝通常の思考メモ。researcher.js等が出力する `date` を基準にする
     let ageDays = 0;
     try {
@@ -149,12 +152,44 @@ function getInboxMemos(now, channels, stalledTasks) {
     } catch (e) {
       ageDays = 0;
     }
- 
+
     plainMemos.push({ name: path.basename(filePath, '.md'), ageDays });
   });
- 
+
   plainMemos.sort((a, b) => b.ageDays - a.ageDays);
   return plainMemos;
+}
+
+// 00_Inbox/brewing 配下の未発酵メモ走査。
+function getBrewingMemos(now) {
+  const brewingDir = path.join(VAULT_PATH, '00_Inbox', 'brewing');
+  if (!fs.existsSync(brewingDir)) return [];
+
+  const files = getAllMarkdownFiles(brewingDir);
+  const items = [];
+
+  files.forEach(filePath => {
+    try {
+      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      const { data } = matter(fileContent);
+      const title = data.title || path.basename(filePath, '.md');
+      const status = (data.status || 'brewing').toLowerCase();
+      const isVoice = (Array.isArray(data.tags) && data.tags.includes('voice-memo')) || data.source === 'voice-input';
+
+      let ageDays = 0;
+      if (data.date) {
+        const d = new Date(data.date);
+        ageDays = !isNaN(d.getTime()) ? Math.floor((now - d.getTime()) / (1000 * 60 * 60 * 24)) : 0;
+      } else {
+        ageDays = Math.floor((now - fs.statSync(filePath).mtimeMs) / (1000 * 60 * 60 * 24));
+      }
+
+      items.push({ title, file: path.basename(filePath), status, ageDays, isVoice });
+    } catch (_) {}
+  });
+
+  items.sort((a, b) => b.ageDays - a.ageDays);
+  return items;
 }
  
 // Claude Scheduled Task（Ship2130 / Moc2300 jst / Ch23）は「Macが起動中のみ」実行される。
@@ -221,13 +256,20 @@ async function runCOOPatrol() {
  
       scanVaultStatus(now, channels, stalledTasks);
       const inboxMemos = getInboxMemos(now, channels, stalledTasks);
+      const brewingMemos = getBrewingMemos(now);
       const scheduleAlerts = checkScheduledTaskHealth(now);
       const fields = [];
- 
+
       // 1. 長期滞留アラート（ボトルネックがある場合のみ上部に強調表示）
       const expiredMemos = inboxMemos.filter(m => m.ageDays >= 7);
+      const stalledBrewing = brewingMemos.filter(m => m.ageDays >= 14 && m.status !== 'brewed');
+      const readyToSublimate = brewingMemos.filter(m => m.status === 'brewed' || m.status === 'ready');
       const alertLines = [];
- 
+
+      if (readyToSublimate.length > 0) {
+        alertLines.push('**☕ 発酵完了メモ（昇華待機中）:**');
+        readyToSublimate.forEach(m => alertLines.push(`  • \`${m.title}\` (\`status: ${m.status}\` 検知)`));
+      }
       if (stalledTasks.length > 0) {
         alertLines.push('**🚧 プロジェクト滞留アラート:**');
         stalledTasks.forEach(s => alertLines.push(`  • [${s.channel}] \`${s.title}\` (${s.status}: ${s.ageDays}日経過)`));
@@ -236,18 +278,22 @@ async function runCOOPatrol() {
         alertLines.push('**⏳ 思考メモの賞味期限切れ (7日以上経過):**');
         expiredMemos.slice(0, 3).forEach(m => alertLines.push(`  • \`${m.name}\` (${m.ageDays}日前)`));
       }
+      if (stalledBrewing.length > 0) {
+        alertLines.push('**🌱 思考の種・長期放置 (14日以上熟成中):**');
+        stalledBrewing.slice(0, 3).forEach(m => alertLines.push(`  • \`${m.title}\` (${m.ageDays}日経過：そろそろ発酵させるか休眠させますか？)`));
+      }
       if (scheduleAlerts.length > 0) {
         alertLines.push('**🗓️ Scheduled Task 未実行の疑い:**');
         scheduleAlerts.forEach(a => alertLines.push(`  • ${a}`));
       }
- 
+
       if (alertLines.length > 0) {
         fields.push({
-          name: '⚠️ ボトルネック検知（要アクション）',
-          value: alertLines.join('\n') + '\n*※作業を進めるか、アーカイブ (done) / 休眠 (shelved) に落としてください。Scheduled Taskの疑いが出た場合はMacの起動状態も確認してください。*'
+          name: '⚠️ ボトルネック ＆ 注目アクション',
+          value: alertLines.join('\n') + '\n*※作業を進めるか、アーカイブ (done) / 休眠 (shelved) に落としてください。*'
         });
       }
- 
+
       // 2. 進行中パイプライン
       const channelKeys = Object.keys(channels);
       if (channelKeys.length === 0) {
@@ -259,7 +305,7 @@ async function runCOOPatrol() {
         channelKeys.forEach(ch => {
           const lines = [];
           const data = channels[ch];
- 
+
           if (data['in-production'].length > 0) {
             lines.push(`🎥 **収録・編集中 (in-production):**\n` + data['in-production'].map(i => `  • \`${i.title}\` (${i.ageDays}日目)`).join('\n'));
           }
@@ -278,7 +324,7 @@ async function runCOOPatrol() {
           if (data.inbox.length > 0) {
             lines.push(`💡 **ネタ・仕込み (inbox):**\n` + data.inbox.map(i => `  • \`${i.title}\``).join('\n'));
           }
- 
+
           if (lines.length > 0) {
             fields.push({
               name: `📦 チャンネル: ${ch}`,
@@ -287,20 +333,52 @@ async function runCOOPatrol() {
           }
         });
       }
- 
-      // 3. Inboxの直近状況
+
+      // 3. 🧪 思考の醸造所（00_Inbox/brewing）
+      if (brewingMemos.length > 0) {
+        const activeBrewing = brewingMemos.filter(m => m.status !== 'brewed' && m.status !== 'ready');
+        const brewLines = [];
+
+        if (readyToSublimate.length > 0) {
+          brewLines.push('☕ **発酵完了（昇華待機中）:**');
+          readyToSublimate.forEach(m => brewLines.push(`  • \`${m.title}\` (\`status: ${m.status}\`)`));
+        }
+
+        if (activeBrewing.length > 0) {
+          if (readyToSublimate.length > 0) brewLines.push('');
+          brewLines.push('🌱 **発酵中の思索・アイデア:**');
+          activeBrewing.slice(0, 5).forEach(m => {
+            const icon = m.isVoice ? '🎙️' : '✍️';
+            const alertTag = m.ageDays >= 10 ? ' ⏳' : '';
+            brewLines.push(`  • ${icon} \`${m.title}\` (${m.ageDays}日熟成中${alertTag})`);
+          });
+          if (activeBrewing.length > 5) {
+            brewLines.push(`  *...他 ${activeBrewing.length - 5} 件*`);
+          }
+        }
+
+        brewLines.push('\n*※Obsidianで追記し `status: brewed` に書き換えると、Botが自動で正規構造化メモに昇華します。*');
+
+        fields.push({
+          name: `🧪 思考の醸造所 (00_Inbox/brewing: ${brewingMemos.length}件)`,
+          value: brewLines.join('\n')
+        });
+      }
+
+      // 4. Inboxの直近状況（成熟した思考ログ）
       if (inboxMemos.length > 0) {
         const memoList = inboxMemos.slice(0, 5).map(m => `• \`${m.name}\` (${m.ageDays}日前)`).join('\n');
         fields.push({
-          name: `📥 直近の未整理思考ログ (${inboxMemos.length}件中)`,
+          name: `📥 直近の思考メモ (00_Inbox: ${inboxMemos.length}件中)`,
           value: memoList
         });
       }
- 
+
+      const hasAlerts = stalledTasks.length > 0 || expiredMemos.length > 0 || scheduleAlerts.length > 0 || stalledBrewing.length > 0;
       const embed = new EmbedBuilder()
         .setTitle('🧭 COO Morning Operation Brief')
         .setDescription('本日の制作状況および滞留ボトルネックの確認です。')
-        .setColor(alertLines.length > 0 ? 0xd97706 : 0x2b2d31) // ボトルネックがあればアンバー（警告色）
+        .setColor(hasAlerts ? 0xd97706 : (readyToSublimate.length > 0 ? 0x10b981 : 0x2b2d31))
         .addFields(fields)
         .setFooter({ text: 'Ship, then polish. — tnumaStudio' })
         .setTimestamp();
