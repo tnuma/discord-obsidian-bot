@@ -340,14 +340,25 @@ function renderPrompterPage(project, bodyHTML) {
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>🎬 ${escapeHTML(project.title)}</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body {
+        html {
+            background-color: #000000;
+            color: #ffffff;
+            overflow-x: hidden;
+            overflow-y: auto;
+            scroll-behavior: auto !important;
+            height: auto;
+            min-height: 100%;
+        }
+        body {
             background-color: #000000;
             color: #ffffff;
             font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "BIZ UDPGothic", Meiryo, sans-serif;
             overflow-x: hidden;
-            width: 100vw;
-            height: 100vh;
+            width: 100%;
+            min-height: 100vh;
+            height: auto;
+            margin: 0;
+            padding: 0;
             user-select: none;
             -webkit-user-select: none;
         }
@@ -568,12 +579,18 @@ function renderPrompterPage(project, bodyHTML) {
     <script>
         // 設定ステート
         let isPlaying = false;
+        let isCountingDown = false;
+        let countdownTimer = null;
         let speed = parseInt(localStorage.getItem('prompter_speed') || '3', 10);
         let fontSize = parseInt(localStorage.getItem('prompter_font_size') || '38', 10);
         let isMirrored = localStorage.getItem('prompter_mirrored') === 'true';
         let animationFrameId = null;
         let lastTimestamp = 0;
         let wakeLock = null;
+
+        // 浮動小数点での累積スクロール位置
+        let currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        let isInternalScroll = false;
 
         const container = document.getElementById('prompter-container');
         const btnPlay = document.getElementById('btn-play');
@@ -630,21 +647,47 @@ function renderPrompterPage(project, bodyHTML) {
             }
         }
 
-        // スクロールループ
+        // ユーザーの手動スクロール検知（ホイール・タッチ）
+        function syncScrollPosition() {
+            if (!isInternalScroll) {
+                currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+            }
+        }
+        window.addEventListener('scroll', syncScrollPosition, { passive: true });
+        window.addEventListener('wheel', syncScrollPosition, { passive: true });
+        window.addEventListener('touchmove', syncScrollPosition, { passive: true });
+
+        // スクロールループ（高精度requestAnimationFrame）
         function scrollStep(timestamp) {
             if (!isPlaying) return;
 
             if (lastTimestamp) {
-                const delta = timestamp - lastTimestamp;
-                // speed 1〜10 をピクセル/秒にマッピング (例: speed 3 = 約 60px/s)
-                const pxPerSecond = 20 + (speed * 18);
+                const delta = Math.min(timestamp - lastTimestamp, 100); // 極端なラグ時の飛び跳ね防止
+
+                // 速度 1〜10 (speed 1: 約30px/s 〜 speed 10: 約250px/s)
+                const pxPerSecond = 15 + (speed * 22);
                 const step = (pxPerSecond * delta) / 1000;
-                window.scrollBy(0, step);
+
+                currentScrollY += step;
+                isInternalScroll = true;
+
+                // 複数のスクロール対象に同時適用（Arc / Chrome / Safari / Firefox 完全対応）
+                window.scrollTo(0, currentScrollY);
+                if (document.documentElement) document.documentElement.scrollTop = currentScrollY;
+                if (document.body) document.body.scrollTop = currentScrollY;
+
+                isInternalScroll = false;
 
                 // 進捗更新
-                const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+                const scrollHeight = Math.max(
+                    document.body.scrollHeight,
+                    document.documentElement.scrollHeight,
+                    container.offsetHeight
+                );
+                const maxScroll = scrollHeight - window.innerHeight;
                 if (maxScroll > 0) {
-                    const percent = Math.min(Math.round((window.scrollY / maxScroll) * 100), 100);
+                    const actualY = window.scrollY || document.documentElement.scrollTop || 0;
+                    const percent = Math.min(Math.round((actualY / maxScroll) * 100), 100);
                     progressText.textContent = percent + '%';
                 }
             }
@@ -655,18 +698,35 @@ function renderPrompterPage(project, bodyHTML) {
 
         // 開始・停止
         function startScrolling() {
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+            isCountingDown = false;
+            countdownOverlay.classList.remove('show');
+
             isPlaying = true;
             btnPlay.textContent = '⏸ 停止';
             btnPlay.classList.add('playing');
+            progressText.style.color = '#10b981';
             lastTimestamp = 0;
+            currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
             requestWakeLock();
             animationFrameId = requestAnimationFrame(scrollStep);
         }
 
         function stopScrolling() {
+            if (countdownTimer) {
+                clearInterval(countdownTimer);
+                countdownTimer = null;
+            }
+            isCountingDown = false;
+            countdownOverlay.classList.remove('show');
+
             isPlaying = false;
             btnPlay.textContent = '▶ 再生';
             btnPlay.classList.remove('playing');
+            progressText.style.color = '#71717a';
             if (animationFrameId) {
                 cancelAnimationFrame(animationFrameId);
                 animationFrameId = null;
@@ -676,24 +736,24 @@ function renderPrompterPage(project, bodyHTML) {
 
         // カウントダウン付き再生
         function togglePlayWithCountdown() {
-            if (isPlaying) {
+            if (isPlaying || isCountingDown) {
                 stopScrolling();
             } else {
-                // カウントダウン演出
+                isCountingDown = true;
                 let count = 3;
                 countdownOverlay.textContent = count;
                 countdownOverlay.classList.add('show');
 
-                const timer = setInterval(() => {
+                countdownTimer = setInterval(() => {
                     count--;
                     if (count > 0) {
                         countdownOverlay.textContent = count;
                     } else {
-                        clearInterval(timer);
-                        countdownOverlay.classList.remove('show');
+                        clearInterval(countdownTimer);
+                        countdownTimer = null;
                         startScrolling();
                     }
-                }, 800);
+                }, 750);
             }
         }
 
@@ -712,11 +772,17 @@ function renderPrompterPage(project, bodyHTML) {
         // 画面タップで一時停止/再開（コントロールエリア以外）
         document.body.addEventListener('click', (e) => {
             if (e.target.closest('#control-panel') || e.target.closest('#top-bar')) return;
-            if (isPlaying) {
+            if (isPlaying || isCountingDown) {
                 stopScrolling();
             } else {
-                startScrolling(); // タップ即再開
+                startScrolling();
             }
+        });
+
+        // カウントダウンオーバーレイ自体のタップでキャンセル
+        countdownOverlay.addEventListener('click', (e) => {
+            e.stopPropagation();
+            stopScrolling();
         });
 
         // キーボード操作（スペースで再生停止、矢印で速度変更）
@@ -735,6 +801,7 @@ function renderPrompterPage(project, bodyHTML) {
         applyFontSize(fontSize);
         applyMirror(isMirrored);
         updateSpeed(speed);
+        currentScrollY = window.scrollY || document.documentElement.scrollTop || 0;
     </script>
 </body>
 </html>`;
