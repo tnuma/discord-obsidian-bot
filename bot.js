@@ -8,25 +8,30 @@ const execPromise = util.promisify(exec);
  
 const { fetchProductResearch, analyzeThoughtMemo } = require('./researcher');
 const { scanActiveProjects } = require('./ship_target_analyzer');
- 
+const { VoiceTranscriber } = require('./voiceTranscriber');
+
 // ==========================================
 // ⚙️ 設定エリア
 // ==========================================
 const TOKEN = process.env.DISCORD_TOKEN;
 const MEMO_CHANNEL_ID = process.env.MEMO_CHANNEL_ID;
 const RESEARCH_CHANNEL_ID = process.env.RESEARCH_CHANNEL_ID;
+const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID;
+const TRANSCRIPT_CHANNEL_ID = process.env.TRANSCRIPT_CHANNEL_ID;
+const SYNC_THOUGHT_TO_OBSIDIAN = process.env.SYNC_THOUGHT_TO_OBSIDIAN === 'true';
 const PROMPTER_PORT = process.env.PROMPTER_PORT || '3333';
- 
+
 const VAULT_ROOT_DIR = process.env.VAULT_PATH || '/home/tnuma/my-vault';
 const MEMO_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox');
 const RESEARCH_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox/Nanshindo');
 // ==========================================
- 
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates,
     ],
 });
  
@@ -138,19 +143,82 @@ async function processQueue() {
         processQueue();
     }
 }
- 
+
+// ----------------------------------------------------
+// 🎙️ 音声思考ログ・文字起こしモジュールの初期化
+// ----------------------------------------------------
+const voiceTranscriber = new VoiceTranscriber(client, {
+    voiceChannelId: VOICE_CHANNEL_ID,
+    outputChannelId: TRANSCRIPT_CHANNEL_ID,
+    onTranscribeComplete: async (formattedText, meta) => {
+        if (!SYNC_THOUGHT_TO_OBSIDIAN) return;
+
+        console.log('🧠 思考ログをObsidianに自動連携・保存します...');
+        taskQueue.push(async () => {
+            try {
+                const existingConcepts = await getExistingConceptsFromVault();
+                const markdownContent = await analyzeThoughtMemo(formattedText, existingConcepts);
+                const cleanTitle = extractFilenameFromMarkdown(markdownContent, `音声思考メモ_${meta.userName}`);
+
+                await fs.mkdir(MEMO_SAVE_DIR, { recursive: true });
+                const filepath = path.join(MEMO_SAVE_DIR, `${cleanTitle}.md`);
+                await fs.writeFile(filepath, markdownContent, 'utf8');
+                console.log(`📝 音声思考ログのVault保存完了: ${filepath}`);
+
+                await syncToGit(`Add voice thought memo: ${cleanTitle}`);
+            } catch (err) {
+                console.error('音声思考ログのObsidian保存エラー:', err);
+            }
+        });
+        processQueue();
+    },
+});
+
 client.once('clientReady', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     console.log('🚀 Nanshindo Multi-Triage Bot is online.');
+    voiceTranscriber.init();
 });
- 
+
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
+
+    const trimmed = (message.content || '').trim().toLowerCase();
+
+    // ----------------------------------------------------
+    // 🏓 稼働確認・ステータスコマンド (!ping / !status)
+    // ----------------------------------------------------
+    if (trimmed === '!ping' || trimmed === '!status') {
+        const vcStatus = voiceTranscriber.connection ? `🟢 接続中 (${voiceTranscriber.activeUserId ? '録音中' : '待機中'})` : '⚪ 未接続';
+        const vcConfig = VOICE_CHANNEL_ID ? `<#${VOICE_CHANNEL_ID}>` : '未設定 (手動 `!join` で利用可能)';
+        const outConfig = TRANSCRIPT_CHANNEL_ID ? `<#${TRANSCRIPT_CHANNEL_ID}>` : 'VC内テキストチャット';
+        return message.reply(`🏓 **Pong! Botは正常に稼働しています。**\n• 対象ボイスチャンネル: ${vcConfig}\n• 投稿先テキストチャンネル: ${outConfig}\n• ボイス接続状態: ${vcStatus}\n\n💡 VCに入ると自動で録音開始、または \`!join\` で今いるVCに呼べます。`);
+    }
+
+    // ----------------------------------------------------
+    // 🎙️ ボイス文字起こし手動操作 (!join / !leave)
+    // ----------------------------------------------------
+    if (trimmed === '!join') {
+        const memberVoiceChannel = message.member?.voice?.channel;
+        if (!memberVoiceChannel) {
+            return message.reply('⚠️ まずあなたがボイスチャンネルに接続してください。');
+        }
+        await voiceTranscriber.startSession(memberVoiceChannel, message.author.id);
+        return message.reply(`🎙️ **${memberVoiceChannel.name}** に参加しました。思考を話し終えてVCを退出（または \`!leave\`）すると自動で文字起こし・整形されます。`);
+    }
+
+    if (trimmed === '!leave') {
+        if (voiceTranscriber.connection) {
+            await voiceTranscriber.endSessionAndTranscribe(message.member?.displayName || message.author.username);
+            return message.reply('🎙️ 録音を終了し、思考ログの文字起こし・整形を開始します...');
+        } else {
+            return message.reply('⚠️ 現在ボイスチャンネルに接続していません。');
+        }
+    }
 
     // ----------------------------------------------------
     // 🎬 プロンプター起動コマンド (!prompter / /prompter / プロンプター)
     // ----------------------------------------------------
-    const trimmed = (message.content || '').trim().toLowerCase();
     if (trimmed === '!prompter' || trimmed === '/prompter' || trimmed === 'プロンプター' || trimmed === '!teleprompter') {
         try {
             const activeProjects = scanActiveProjects(VAULT_ROOT_DIR);
