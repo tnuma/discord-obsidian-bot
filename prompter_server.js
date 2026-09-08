@@ -154,45 +154,73 @@ function getAvailableProjects() {
     return list;
 }
 
-// Markdownの本文をプロンプター用プレーンHTMLに変換
+// Markdownの本文をブロック構造化HTMLに変換（段落・【間】・キューの個別認識）
 function convertMarkdownToPrompterHTML(rawContent) {
-    // 1. Frontmatterの除去
     let text = rawContent.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
-
-    // 2. 不要なセクション（メタ情報など）の除去
     text = text.replace(/<!--[\s\S]*?-->/g, '');
 
-    const lines = text.split('\n');
-    const htmlLines = [];
+    // 空行（2つ以上の改行）でスピーチブロックに分割
+    const rawChunks = text.split(/\r?\n\s*\r?\n+/);
+    const htmlBlocks = [];
+    let blockIndex = 0;
 
-    for (let line of lines) {
-        line = line.trim();
-        if (!line) {
-            htmlLines.push('<div class="spacer"></div>');
+    for (let chunk of rawChunks) {
+        const trimmed = chunk.trim();
+        if (!trimmed) continue;
+
+        // 進行キュー（〔...〕）
+        if (trimmed.startsWith('〔') && trimmed.endsWith('〕')) {
+            htmlBlocks.push(`<div class="p-cue">${escapeHTML(trimmed)}</div>`);
             continue;
         }
 
-        // 見出し
-        if (line.startsWith('# ')) {
-            htmlLines.push(`<h1 class="p-h1">${escapeHTML(line.slice(2))}</h1>`);
-        } else if (line.startsWith('## ')) {
-            htmlLines.push(`<h2 class="p-h2">${escapeHTML(line.slice(3))}</h2>`);
-        } else if (line.startsWith('### ')) {
-            htmlLines.push(`<h3 class="p-h3">${escapeHTML(line.slice(4))}</h3>`);
-        } else if (line.startsWith('>')) {
-            // 引用
-            htmlLines.push(`<blockquote class="p-quote">${escapeHTML(line.replace(/^>\s*/, ''))}</blockquote>`);
-        } else if (line.startsWith('- ') || line.startsWith('* ') || line.startsWith('• ')) {
-            // リスト
-            const itemText = line.replace(/^[-*•]\s*/, '');
-            htmlLines.push(`<div class="p-list-item"><span class="bullet">•</span> ${formatInlineMarkdown(itemText)}</div>`);
-        } else {
-            // 通常段落
-            htmlLines.push(`<p class="p-para">${formatInlineMarkdown(line)}</p>`);
+        // 大見出し
+        if (trimmed.startsWith('# ')) {
+            htmlBlocks.push(`<h1 class="p-h1">${escapeHTML(trimmed.slice(2))}</h1>`);
+            continue;
         }
+        // 中見出し
+        if (trimmed.startsWith('## ')) {
+            htmlBlocks.push(`<h2 class="p-h2">${escapeHTML(trimmed.slice(3))}</h2>`);
+            continue;
+        }
+        if (trimmed.startsWith('### ')) {
+            htmlBlocks.push(`<h3 class="p-h3">${escapeHTML(trimmed.slice(4))}</h3>`);
+            continue;
+        }
+
+        // 【間】ポーズ
+        if (trimmed === '【間】' || trimmed.startsWith('【間】')) {
+            htmlBlocks.push(`
+                <div class="speech-block is-pause" data-index="${blockIndex++}">
+                    <div class="pause-box">⏳ 【間】（息継ぎ・沈黙）</div>
+                </div>
+            `);
+            continue;
+        }
+
+        // 区切り線
+        if (trimmed.includes('━━━') || trimmed === '---') {
+            htmlBlocks.push(`<div class="p-divider"></div>`);
+            continue;
+        }
+
+        // 凡例や引用
+        if (trimmed.startsWith('>')) {
+            htmlBlocks.push(`<blockquote class="p-quote">${escapeHTML(trimmed.replace(/^>\s*/, ''))}</blockquote>`);
+            continue;
+        }
+
+        // 通常のセリフ段落（複数行の改行を保持）
+        const lines = trimmed.split('\n').map(l => formatInlineMarkdown(l.trim())).join('<br>');
+        htmlBlocks.push(`
+            <div class="speech-block" data-index="${blockIndex++}">
+                <p class="speech-text">${lines}</p>
+            </div>
+        `);
     }
 
-    return htmlLines.join('\n');
+    return htmlBlocks.join('\n');
 }
 
 function escapeHTML(str) {
@@ -345,7 +373,7 @@ function renderPrompterPage(project, bodyHTML) {
             color: #ffffff;
             overflow-x: hidden;
             overflow-y: auto;
-            scroll-behavior: auto !important;
+            scroll-behavior: smooth;
             height: auto;
             min-height: 100%;
         }
@@ -363,24 +391,22 @@ function renderPrompterPage(project, bodyHTML) {
             -webkit-user-select: none;
         }
 
-        /* 目線ガイドライン (上部32%付近) */
+        /* 目線ガイドライン (上部30%付近) */
         #reading-guide {
             position: fixed;
-            top: 32%;
+            top: 30%;
             left: 0;
             right: 0;
             height: 2px;
-            background: linear-gradient(90deg, transparent, rgba(239, 68, 68, 0.45) 20%, rgba(239, 68, 68, 0.8) 50%, rgba(239, 68, 68, 0.45) 80%, transparent);
+            background: linear-gradient(90deg, transparent, rgba(239, 68, 68, 0.4) 15%, rgba(239, 68, 68, 0.9) 50%, rgba(239, 68, 68, 0.4) 85%, transparent);
             pointer-events: none;
             z-index: 100;
-            transition: opacity 0.3s;
         }
 
         /* スクロール本文エリア */
         #prompter-container {
             width: 100%;
-            min-height: 100vh;
-            padding: 38vh 24px 70vh 24px;
+            padding: 30vh 20px 65vh 20px;
             max-width: 820px;
             margin: 0 auto;
             transition: transform 0.2s;
@@ -389,151 +415,115 @@ function renderPrompterPage(project, bodyHTML) {
             transform: scaleX(-1);
         }
 
+        /* スピーチブロック（一節・段落）のスタイリング */
+        .speech-block {
+            padding: 16px 20px;
+            margin-bottom: 36px;
+            border-radius: 12px;
+            border-left: 4px solid transparent;
+            opacity: 0.22;
+            filter: blur(0.4px);
+            transform: scale(0.97);
+            transition: opacity 0.25s ease, transform 0.25s ease, filter 0.25s ease, background 0.25s ease;
+            cursor: pointer;
+        }
+
+        /* アクティブ（今読むべきブロック）の強調ハイライト */
+        .speech-block.active {
+            opacity: 1;
+            filter: none;
+            transform: scale(1.01);
+            color: #ffffff;
+            background: rgba(251, 191, 36, 0.08);
+            border-left: 5px solid #f59e0b;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+        }
+        .speech-block.active .speech-text {
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        /* 【間】ポーズのスタイリング */
+        .speech-block.is-pause {
+            text-align: center;
+            padding: 12px;
+            margin-bottom: 40px;
+        }
+        .pause-box {
+            display: inline-block;
+            color: #f87171;
+            font-size: 0.85em;
+            font-weight: 800;
+            padding: 6px 16px;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px dashed rgba(239, 68, 68, 0.4);
+            border-radius: 20px;
+            letter-spacing: 0.05em;
+        }
+        .speech-block.is-pause.active {
+            border-left: 5px solid #ef4444;
+            background: rgba(239, 68, 68, 0.15);
+        }
+        .speech-block.is-pause.active .pause-box {
+            background: #ef4444;
+            color: #ffffff;
+            border-style: solid;
+        }
+
         /* タイポグラフィ */
+        .speech-text {
+            font-size: 1em;
+            line-height: 1.8;
+            letter-spacing: 0.04em;
+        }
+        .p-cue {
+            font-size: 0.8em;
+            color: #60a5fa;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            margin: 40px 0 12px 0;
+            opacity: 0.85;
+        }
         .p-h1 {
             font-size: 1.3em;
-            font-weight: 800;
+            font-weight: 900;
             color: #f59e0b;
             margin: 40px 0 20px 0;
-            line-height: 1.3;
             border-bottom: 2px solid #333;
             padding-bottom: 8px;
         }
         .p-h2 {
             font-size: 1.15em;
-            font-weight: 700;
+            font-weight: 800;
             color: #60a5fa;
             margin: 32px 0 16px 0;
-            line-height: 1.35;
         }
-        .p-h3 {
-            font-size: 1.05em;
-            font-weight: 700;
-            color: #a78bfa;
-            margin: 24px 0 12px 0;
-        }
-        .p-para {
-            font-size: 1em;
-            line-height: 1.7;
-            margin-bottom: 24px;
-            letter-spacing: 0.03em;
-            font-weight: 500;
-        }
-        .p-bold {
-            color: #fbbf24;
-            font-weight: 800;
+        .p-bold { color: #fbbf24; font-weight: 900; }
+        .p-link { color: #38bdf8; border-bottom: 1px dotted #38bdf8; }
+        .p-divider {
+            height: 1px;
+            background: #27272a;
+            margin: 40px 0;
         }
         .p-quote {
             border-left: 4px solid #4b5563;
-            padding: 10px 16px;
+            padding: 8px 16px;
             margin: 20px 0;
-            background: rgba(255, 255, 255, 0.05);
-            font-style: italic;
-        }
-        .p-list-item {
-            font-size: 1em;
-            line-height: 1.65;
-            margin-bottom: 14px;
-            padding-left: 8px;
-        }
-        .p-list-item .bullet { color: #f59e0b; font-weight: bold; margin-right: 6px; }
-        .p-link { color: #38bdf8; border-bottom: 1px dotted #38bdf8; }
-        .spacer { height: 20px; }
-
-        /* カウントダウンオーバーレイ */
-        #countdown-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0, 0, 0, 0.85);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 120px;
-            font-weight: 900;
-            color: #fbbf24;
-            z-index: 500;
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.2s;
-        }
-        #countdown-overlay.show {
-            opacity: 1;
-            pointer-events: auto;
+            color: #9ca3af;
+            font-size: 0.85em;
         }
 
-        /* コントロールバー（画面下部） */
-        #control-panel {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: rgba(18, 18, 24, 0.95);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-top: 1px solid #27272a;
-            padding: 12px 16px calc(12px + env(safe-area-inset-bottom)) 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            z-index: 300;
-            transition: transform 0.3s, opacity 0.3s;
-        }
-        #control-panel.hidden {
-            transform: translateY(100%);
-            opacity: 0;
-        }
-
-        .btn-group { display: flex; align-items: center; gap: 8px; }
-        button {
-            background: #27272a;
-            border: 1px solid #3f3f46;
-            color: #fff;
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 600;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            -webkit-tap-highlight-color: transparent;
-        }
-        button:active { background: #3f3f46; transform: scale(0.95); }
-        #btn-play {
-            background: #10b981;
-            border-color: #059669;
-            padding: 10px 20px;
-            font-size: 16px;
-            font-weight: 800;
-            border-radius: 10px;
-        }
-        #btn-play.playing {
-            background: #ef4444;
-            border-color: #dc2626;
-        }
-
-        .speed-label {
-            font-size: 12px;
-            color: #a1a1aa;
-            min-width: 48px;
-            text-align: center;
-        }
-
-        /* 画面右上のクイック切替アイコン */
+        /* 画面右上の情報バー */
         #top-bar {
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
+            top: 0; left: 0; right: 0;
             padding: 12px 16px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: linear-gradient(180deg, rgba(0,0,0,0.8) 0%, transparent 100%);
+            background: linear-gradient(180deg, rgba(0,0,0,0.85) 0%, transparent 100%);
             z-index: 300;
-            transition: opacity 0.3s;
         }
-        #top-bar.hidden { opacity: 0; pointer-events: none; }
         .back-btn {
             color: #a1a1aa;
             text-decoration: none;
@@ -542,19 +532,104 @@ function renderPrompterPage(project, bodyHTML) {
             align-items: center;
             gap: 4px;
         }
-        .progress-indicator { font-size: 12px; color: #71717a; font-weight: 600; }
+        .mode-indicator {
+            font-size: 12px;
+            font-weight: 700;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: #27272a;
+            color: #fbbf24;
+        }
+        .progress-indicator { font-size: 13px; color: #a1a1aa; font-weight: 700; }
+
+        /* コントロールバー（画面下部） */
+        #control-panel {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            background: rgba(18, 18, 24, 0.95);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-top: 1px solid #27272a;
+            padding: 10px 14px calc(10px + env(safe-area-inset-bottom)) 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            z-index: 300;
+            gap: 8px;
+        }
+        .btn-group { display: flex; align-items: center; gap: 6px; }
+        button {
+            background: #27272a;
+            border: 1px solid #3f3f46;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+        button:active { background: #3f3f46; transform: scale(0.95); }
+
+        /* メインアクションボタン */
+        #btn-next {
+            background: #10b981;
+            border-color: #059669;
+            color: #fff;
+            padding: 9px 18px;
+            font-size: 15px;
+            font-weight: 800;
+            border-radius: 10px;
+            flex-grow: 1;
+            max-width: 140px;
+        }
+        #btn-prev {
+            background: #374151;
+            border-color: #4b5563;
+            padding: 9px 14px;
+            font-size: 14px;
+            font-weight: 700;
+            border-radius: 10px;
+        }
+        #btn-mode {
+            background: #312e81;
+            border-color: #4338ca;
+            color: #c7d2fe;
+            font-size: 12px;
+            padding: 8px 10px;
+        }
+        #btn-mode.auto {
+            background: #065f46;
+            border-color: #047857;
+            color: #a7f3d0;
+        }
+
+        /* 画面左右のタップゾーン（見えないボタン） */
+        #tap-prev-zone {
+            position: fixed;
+            top: 50px; left: 0; width: 30%; bottom: 65px;
+            z-index: 50;
+        }
+        #tap-next-zone {
+            position: fixed;
+            top: 50px; right: 0; width: 70%; bottom: 65px;
+            z-index: 50;
+        }
     </style>
 </head>
 <body>
 
     <div id="top-bar">
         <a href="/" class="back-btn">← 案件一覧</a>
-        <div class="progress-indicator" id="progress-text">0%</div>
+        <div class="mode-indicator" id="mode-badge">👆 タップ送りモード</div>
+        <div class="progress-indicator" id="progress-text">1 / 1</div>
     </div>
 
     <div id="reading-guide"></div>
 
-    <div id="countdown-overlay">3</div>
+    <!-- 画面タップ用ゾーン -->
+    <div id="tap-prev-zone" title="左側タップで前へ"></div>
+    <div id="tap-next-zone" title="右側タップで次へ"></div>
 
     <div id="prompter-container">
         ${bodyHTML}
@@ -567,49 +642,45 @@ function renderPrompterPage(project, bodyHTML) {
             <button id="btn-mirror" title="左右反転">🪞</button>
         </div>
 
-        <button id="btn-play">▶ 再生</button>
+        <div class="btn-group" style="flex-grow:1; justify-content:center;">
+            <button id="btn-prev">◀ 前へ</button>
+            <button id="btn-next">次へ ▶</button>
+        </div>
 
         <div class="btn-group">
-            <button id="btn-speed-dec">−</button>
-            <span class="speed-label" id="speed-display">速度 3</span>
-            <button id="btn-speed-inc">+</button>
+            <button id="btn-mode">👆 ステップ</button>
         </div>
     </div>
 
     <script>
         // 設定ステート
-        let isPlaying = false;
-        let isCountingDown = false;
-        let countdownTimer = null;
-        let speed = parseInt(localStorage.getItem('prompter_speed') || '3', 10);
-        let fontSize = parseInt(localStorage.getItem('prompter_font_size') || '38', 10);
+        let activeIndex = 0;
+        let mode = localStorage.getItem('prompter_mode') || 'step'; // 'step' (タップ送り) または 'auto' (自動)
+        let fontSize = parseInt(localStorage.getItem('prompter_font_size') || '36', 10);
         let isMirrored = localStorage.getItem('prompter_mirrored') === 'true';
-        let animationFrameId = null;
-        let lastTimestamp = 0;
+        let autoTimer = null;
         let wakeLock = null;
 
-        // 浮動小数点での累積スクロール位置
-        let currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-        let isInternalScroll = false;
-
+        const blocks = Array.from(document.querySelectorAll('.speech-block'));
         const container = document.getElementById('prompter-container');
-        const btnPlay = document.getElementById('btn-play');
-        const speedDisplay = document.getElementById('speed-display');
-        const btnSpeedInc = document.getElementById('btn-speed-inc');
-        const btnSpeedDec = document.getElementById('btn-speed-dec');
+        const btnNext = document.getElementById('btn-next');
+        const btnPrev = document.getElementById('btn-prev');
+        const btnMode = document.getElementById('btn-mode');
         const btnFontInc = document.getElementById('btn-font-inc');
         const btnFontDec = document.getElementById('btn-font-dec');
         const btnMirror = document.getElementById('btn-mirror');
-        const countdownOverlay = document.getElementById('countdown-overlay');
-        const controlPanel = document.getElementById('control-panel');
-        const topBar = document.getElementById('top-bar');
+        const modeBadge = document.getElementById('mode-badge');
         const progressText = document.getElementById('progress-text');
+        const tapNextZone = document.getElementById('tap-next-zone');
+        const tapPrevZone = document.getElementById('tap-prev-zone');
 
         // フォントサイズ適用
         function applyFontSize(size) {
-            fontSize = Math.min(Math.max(size, 20), 72);
+            fontSize = Math.min(Math.max(size, 20), 64);
             container.style.fontSize = fontSize + 'px';
             localStorage.setItem('prompter_font_size', fontSize);
+            // サイズ変更時に現在位置を再調整
+            setTimeout(() => scrollToBlock(activeIndex, false), 50);
         }
 
         // ミラー反転適用
@@ -625,20 +696,116 @@ function renderPrompterPage(project, bodyHTML) {
             localStorage.setItem('prompter_mirrored', isMirrored);
         }
 
-        // 速度更新
-        function updateSpeed(newSpeed) {
-            speed = Math.min(Math.max(newSpeed, 1), 10);
-            speedDisplay.textContent = '速度 ' + speed;
-            localStorage.setItem('prompter_speed', speed);
+        // モード切替
+        function setMode(newMode) {
+            mode = newMode;
+            localStorage.setItem('prompter_mode', mode);
+
+            if (mode === 'auto') {
+                btnMode.textContent = '🌊 自動流し';
+                btnMode.classList.add('auto');
+                modeBadge.textContent = '🌊 自動呼吸モード';
+                modeBadge.style.color = '#34d399';
+                startAutoPlay();
+            } else {
+                btnMode.textContent = '👆 ステップ';
+                btnMode.classList.remove('auto');
+                modeBadge.textContent = '👆 タップ送りモード';
+                modeBadge.style.color = '#fbbf24';
+                stopAutoPlay();
+            }
         }
 
-        // Wake Lock（画面スリープ防止）
+        // 指定ブロックへジャンプ＆フォーカス
+        function scrollToBlock(index, smooth = true) {
+            if (blocks.length === 0) return;
+            activeIndex = Math.min(Math.max(index, 0), blocks.length - 1);
+
+            blocks.forEach((b, idx) => {
+                if (idx === activeIndex) {
+                    b.classList.add('active');
+                } else {
+                    b.classList.remove('active');
+                }
+            });
+
+            // 進行度表示
+            progressText.textContent = (activeIndex + 1) + ' / ' + blocks.length;
+
+            // 目線ガイド位置（画面の上部30%）に対象ブロックの先頭を合わせる
+            const activeBlock = blocks[activeIndex];
+            if (activeBlock) {
+                const blockRect = activeBlock.getBoundingClientRect();
+                const currentY = window.scrollY || document.documentElement.scrollTop || 0;
+                const targetY = currentY + blockRect.top - (window.innerHeight * 0.30);
+
+                window.scrollTo({
+                    top: Math.max(0, targetY),
+                    behavior: smooth ? 'smooth' : 'auto'
+                });
+            }
+        }
+
+        function nextBlock() {
+            if (activeIndex < blocks.length - 1) {
+                scrollToBlock(activeIndex + 1, true);
+                if (mode === 'auto') scheduleNextAuto();
+            } else if (mode === 'auto') {
+                stopAutoPlay();
+            }
+        }
+
+        function prevBlock() {
+            if (activeIndex > 0) {
+                scrollToBlock(activeIndex - 1, true);
+                if (mode === 'auto') scheduleNextAuto();
+            }
+        }
+
+        // 自動モードの進行スケジュール（セリフ量に応じた呼吸時間）
+        function scheduleNextAuto() {
+            if (autoTimer) clearTimeout(autoTimer);
+            if (mode !== 'auto') return;
+
+            const currentBlock = blocks[activeIndex];
+            let delayMs = 3000; // 基本3秒
+
+            if (currentBlock) {
+                if (currentBlock.classList.contains('is-pause')) {
+                    // 【間】の場合は2秒静止
+                    delayMs = 2200;
+                } else {
+                    // 文字数に応じた時間 (約1文字あたり 100ms + 1.2秒の余白)
+                    const textLen = currentBlock.textContent.trim().length;
+                    delayMs = Math.min(Math.max(1500 + (textLen * 95), 2500), 10000);
+                }
+            }
+
+            autoTimer = setTimeout(() => {
+                nextBlock();
+            }, delayMs);
+        }
+
+        function startAutoPlay() {
+            requestWakeLock();
+            scheduleNextAuto();
+        }
+
+        function stopAutoPlay() {
+            if (autoTimer) {
+                clearTimeout(autoTimer);
+                autoTimer = null;
+            }
+            releaseWakeLock();
+        }
+
+        // Wake Lock
         async function requestWakeLock() {
             try {
                 if ('wakeLock' in navigator) {
                     wakeLock = await navigator.wakeLock.request('screen');
                 }
-            } catch (err) {}
+            } catch (_) {}
         }
         function releaseWakeLock() {
             if (wakeLock) {
@@ -647,161 +814,50 @@ function renderPrompterPage(project, bodyHTML) {
             }
         }
 
-        // ユーザーの手動スクロール検知（ホイール・タッチ）
-        function syncScrollPosition() {
-            if (!isInternalScroll) {
-                currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-            }
-        }
-        window.addEventListener('scroll', syncScrollPosition, { passive: true });
-        window.addEventListener('wheel', syncScrollPosition, { passive: true });
-        window.addEventListener('touchmove', syncScrollPosition, { passive: true });
-
-        // スクロールループ（高精度requestAnimationFrame）
-        function scrollStep(timestamp) {
-            if (!isPlaying) return;
-
-            if (lastTimestamp) {
-                const delta = Math.min(timestamp - lastTimestamp, 100); // 極端なラグ時の飛び跳ね防止
-
-                // 速度 1〜10 (speed 1: 約30px/s 〜 speed 10: 約250px/s)
-                const pxPerSecond = 15 + (speed * 22);
-                const step = (pxPerSecond * delta) / 1000;
-
-                currentScrollY += step;
-                isInternalScroll = true;
-
-                // 複数のスクロール対象に同時適用（Arc / Chrome / Safari / Firefox 完全対応）
-                window.scrollTo(0, currentScrollY);
-                if (document.documentElement) document.documentElement.scrollTop = currentScrollY;
-                if (document.body) document.body.scrollTop = currentScrollY;
-
-                isInternalScroll = false;
-
-                // 進捗更新
-                const scrollHeight = Math.max(
-                    document.body.scrollHeight,
-                    document.documentElement.scrollHeight,
-                    container.offsetHeight
-                );
-                const maxScroll = scrollHeight - window.innerHeight;
-                if (maxScroll > 0) {
-                    const actualY = window.scrollY || document.documentElement.scrollTop || 0;
-                    const percent = Math.min(Math.round((actualY / maxScroll) * 100), 100);
-                    progressText.textContent = percent + '%';
-                }
-            }
-
-            lastTimestamp = timestamp;
-            animationFrameId = requestAnimationFrame(scrollStep);
-        }
-
-        // 開始・停止
-        function startScrolling() {
-            if (countdownTimer) {
-                clearInterval(countdownTimer);
-                countdownTimer = null;
-            }
-            isCountingDown = false;
-            countdownOverlay.classList.remove('show');
-
-            isPlaying = true;
-            btnPlay.textContent = '⏸ 停止';
-            btnPlay.classList.add('playing');
-            progressText.style.color = '#10b981';
-            lastTimestamp = 0;
-            currentScrollY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
-            requestWakeLock();
-            animationFrameId = requestAnimationFrame(scrollStep);
-        }
-
-        function stopScrolling() {
-            if (countdownTimer) {
-                clearInterval(countdownTimer);
-                countdownTimer = null;
-            }
-            isCountingDown = false;
-            countdownOverlay.classList.remove('show');
-
-            isPlaying = false;
-            btnPlay.textContent = '▶ 再生';
-            btnPlay.classList.remove('playing');
-            progressText.style.color = '#71717a';
-            if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
-                animationFrameId = null;
-            }
-            releaseWakeLock();
-        }
-
-        // カウントダウン付き再生
-        function togglePlayWithCountdown() {
-            if (isPlaying || isCountingDown) {
-                stopScrolling();
-            } else {
-                isCountingDown = true;
-                let count = 3;
-                countdownOverlay.textContent = count;
-                countdownOverlay.classList.add('show');
-
-                countdownTimer = setInterval(() => {
-                    count--;
-                    if (count > 0) {
-                        countdownOverlay.textContent = count;
-                    } else {
-                        clearInterval(countdownTimer);
-                        countdownTimer = null;
-                        startScrolling();
-                    }
-                }, 750);
-            }
-        }
-
-        // イベントバインド
-        btnPlay.addEventListener('click', (e) => {
-            e.stopPropagation();
-            togglePlayWithCountdown();
-        });
-
-        btnSpeedInc.addEventListener('click', (e) => { e.stopPropagation(); updateSpeed(speed + 1); });
-        btnSpeedDec.addEventListener('click', (e) => { e.stopPropagation(); updateSpeed(speed - 1); });
+        // ボタンイベント
+        btnNext.addEventListener('click', (e) => { e.stopPropagation(); nextBlock(); });
+        btnPrev.addEventListener('click', (e) => { e.stopPropagation(); prevBlock(); });
         btnFontInc.addEventListener('click', (e) => { e.stopPropagation(); applyFontSize(fontSize + 4); });
         btnFontDec.addEventListener('click', (e) => { e.stopPropagation(); applyFontSize(fontSize - 4); });
         btnMirror.addEventListener('click', (e) => { e.stopPropagation(); applyMirror(!isMirrored); });
-
-        // 画面タップで一時停止/再開（コントロールエリア以外）
-        document.body.addEventListener('click', (e) => {
-            if (e.target.closest('#control-panel') || e.target.closest('#top-bar')) return;
-            if (isPlaying || isCountingDown) {
-                stopScrolling();
-            } else {
-                startScrolling();
-            }
-        });
-
-        // カウントダウンオーバーレイ自体のタップでキャンセル
-        countdownOverlay.addEventListener('click', (e) => {
+        btnMode.addEventListener('click', (e) => {
             e.stopPropagation();
-            stopScrolling();
+            setMode(mode === 'step' ? 'auto' : 'step');
         });
 
-        // キーボード操作（スペースで再生停止、矢印で速度変更）
+        // 画面タップ操作
+        // 右側（広め）をタップで次へ、左側をタップで前へ
+        tapNextZone.addEventListener('click', () => nextBlock());
+        tapPrevZone.addEventListener('click', () => prevBlock());
+
+        // 各ブロックを直接タップした場合もそのブロックへジャンプ
+        blocks.forEach((block, idx) => {
+            block.addEventListener('click', (e) => {
+                e.stopPropagation();
+                scrollToBlock(idx, true);
+                if (mode === 'auto') scheduleNextAuto();
+            });
+        });
+
+        // キーボード操作
         window.addEventListener('keydown', (e) => {
-            if (e.code === 'Space') {
+            if (e.code === 'Space' || e.code === 'ArrowDown' || e.code === 'ArrowRight' || e.code === 'Enter') {
                 e.preventDefault();
-                togglePlayWithCountdown();
-            } else if (e.code === 'ArrowUp') {
-                updateSpeed(speed + 1);
-            } else if (e.code === 'ArrowDown') {
-                updateSpeed(speed - 1);
+                nextBlock();
+            } else if (e.code === 'ArrowUp' || e.code === 'ArrowLeft') {
+                e.preventDefault();
+                prevBlock();
+            } else if (e.code === 'KeyM') {
+                setMode(mode === 'step' ? 'auto' : 'step');
             }
         });
 
-        // 初期化実行
+        // 初期化
         applyFontSize(fontSize);
         applyMirror(isMirrored);
-        updateSpeed(speed);
-        currentScrollY = window.scrollY || document.documentElement.scrollTop || 0;
+        setMode(mode);
+        scrollToBlock(0, false);
+        requestWakeLock();
     </script>
 </body>
 </html>`;
