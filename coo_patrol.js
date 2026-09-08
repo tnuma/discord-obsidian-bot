@@ -1,28 +1,3 @@
-
-/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Coo patrol · JS
 const fs = require('fs');
 const path = require('path');
 const matter = require('gray-matter');
