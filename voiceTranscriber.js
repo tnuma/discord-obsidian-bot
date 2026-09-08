@@ -79,7 +79,7 @@ class VoiceTranscriber {
         this.client = client;
         this.targetVoiceChannelId = options.voiceChannelId || process.env.VOICE_CHANNEL_ID;
         this.outputChannelId = options.outputChannelId || process.env.TRANSCRIPT_CHANNEL_ID;
-        this.geminiModel = options.geminiModel || process.env.VOICE_GEMINI_MODEL || 'gemini-2.5-flash';
+        this.geminiModel = options.geminiModel || process.env.VOICE_GEMINI_MODEL || 'gemini-3.6-flash';
         this.onTranscribeComplete = options.onTranscribeComplete || null;
 
         // セッション管理
