@@ -154,8 +154,10 @@ client.on('messageCreate', async (message) => {
     if (trimmed === '!prompter' || trimmed === '/prompter' || trimmed === 'プロンプター' || trimmed === '!teleprompter') {
         try {
             const activeProjects = scanActiveProjects(VAULT_ROOT_DIR);
-            const readyList = activeProjects.filter(p => p.status === 'ready');
-            const inProdList = activeProjects.filter(p => p.status === 'in-production');
+            // prompter.md が存在する案件のみに絞り込み
+            const prompterProjects = activeProjects.filter(p => p.hasPrompter);
+            const readyList = prompterProjects.filter(p => p.status === 'ready');
+            const inProdList = prompterProjects.filter(p => p.status === 'in-production');
 
             const baseUrl = `http://pi4.local:${PROMPTER_PORT}`;
             const fields = [];
@@ -180,13 +182,13 @@ client.on('messageCreate', async (message) => {
                 .setTitle('🎬 Web Teleprompter')
                 .setDescription(`タップするとスマホのブラウザで全画面プロンプターが起動します。\n一覧画面: [**案件リストを開く**](${baseUrl})`)
                 .setColor(readyList.length > 0 ? 0x10b981 : 0x3498db)
-                .setFooter({ text: '自動スクロール・速度調整・文字サイズ変更対応' })
+                .setFooter({ text: 'ステップ送り・呼吸オート・目線ガイド対応' })
                 .setTimestamp();
 
             if (fields.length > 0) {
                 embed.addFields(fields);
             } else {
-                embed.addFields({ name: 'お知らせ', value: '現在 ready または in-production の案件はありません。' });
+                embed.addFields({ name: 'お知らせ', value: '現在 `prompter.md`（専用台本）が用意された案件はありません。\n案件フォルダ内に `prompter.md` を作成すると自動表示されます。' });
             }
 
             await message.reply({ embeds: [embed] });

@@ -215,6 +215,10 @@ function scanActiveProjects(vaultPath) {
                     matchedConfig = { id: 'other', displayName: 'その他' };
                 }
 
+                // 案件フォルダ内に prompter.md が存在するか判定
+                const projectDir = path.dirname(file.fullPath);
+                const hasPrompter = fs.existsSync(path.join(projectDir, 'prompter.md'));
+
                 projects.push({
                     title: title || path.basename(file.name, '.md'),
                     fileName: file.name,
@@ -223,7 +227,8 @@ function scanActiveProjects(vaultPath) {
                     status: status.toLowerCase(),
                     ageDays,
                     channelId: matchedConfig.id,
-                    channelName: matchedConfig.displayName
+                    channelName: matchedConfig.displayName,
+                    hasPrompter
                 });
             }
         } catch (e) {

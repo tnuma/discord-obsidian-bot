@@ -91,8 +91,8 @@ function getAllMarkdownFiles(dirPath, arrayOfFiles = []) {
     return arrayOfFiles;
 }
 
-// 案件一覧の収集
-function getAvailableProjects() {
+// 案件一覧の収集（prompterOnly: true の場合は prompter.md が存在する案件のみ）
+function getAvailableProjects(prompterOnly = true) {
     const projectsDir = path.join(VAULT_PATH, '01_Projects');
     if (!fs.existsSync(projectsDir)) return [];
 
@@ -151,6 +151,9 @@ function getAvailableProjects() {
         return b.mtimeMs - a.mtimeMs;
     });
 
+    if (prompterOnly) {
+        return list.filter(p => Boolean(p.files.prompter));
+    }
     return list;
 }
 
@@ -341,11 +344,11 @@ function renderIndexPage(projects, ips) {
     <div class="container">
         <header>
             <h1>🎬 Web Teleprompter</h1>
-            <p class="subtitle">台本を選んでタップすると収録用プロンプターが起動します</p>
+            <p class="subtitle">収録用台本（prompter.md）が用意された案件一覧</p>
         </header>
 
         <div class="projects-list">
-            ${projects.length > 0 ? projectCards : '<p style="text-align:center; padding:40px; color:#94a3b8;">現在 ready または in-production の案件はありません。</p>'}
+            ${projects.length > 0 ? projectCards : '<p style="text-align:center; padding:40px; color:#94a3b8; line-height:1.8;">現在 prompter.md（専用台本）が用意された案件はありません。<br><span style="font-size:12px; color:#64748b;">案件フォルダに prompter.md を作成すると自動表示されます</span></p>'}
         </div>
 
         <div class="ip-footer">
@@ -887,7 +890,7 @@ const server = http.createServer((req, res) => {
     // 2. プロンプター画面: /p/:encodedKey
     if (pathname.startsWith('/p/')) {
         const targetKey = decodeURIComponent(pathname.slice(3));
-        const projects = getAvailableProjects();
+        const projects = getAvailableProjects(false);
         const project = projects.find(p => p.key === targetKey || p.key.endsWith(targetKey));
 
         if (!project) {
