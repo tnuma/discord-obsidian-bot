@@ -194,12 +194,13 @@ const voiceTranscriber = new VoiceTranscriber(client, {
                 await fs.writeFile(filepath, markdownContent, 'utf8');
                 console.log(`📝 音声思考ログのVault保存完了: ${filepath}`);
 
-                // 4. Git同期
-                await syncToGit(`Add voice memo: ${cleanTitle}`);
-
                 // 5. Discordへ完了通知
                 if (channel) {
-                    await channel.send(`💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`);
+                    const isSeed = /type:\s*thought-seed/.test(markdownContent);
+                    const notifyMsg = isSeed
+                        ? `🌱 **${cleanTitle}** を「未発酵の思考の種」としてObsidianに保存しました！`
+                        : `💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`;
+                    await channel.send(notifyMsg);
                 }
             } catch (err) {
                 console.error('音声思考ログのObsidian保存エラー:', err);
@@ -385,7 +386,11 @@ client.on('messageCreate', async (message) => {
                     try { await waitReaction.users.remove(client.user.id); } catch (_) {}
                 }
                 await message.react('✅');
-                await message.reply(`💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`);
+                const isSeed = /type:\s*thought-seed/.test(markdownContent);
+                const replyMsg = isSeed
+                    ? `🌱 **${cleanTitle}** を「未発酵の思考の種」としてObsidianに保存しました！`
+                    : `💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`;
+                await message.reply(replyMsg);
  
             } catch (error) {
                 console.error(`Memo error:`, error);
