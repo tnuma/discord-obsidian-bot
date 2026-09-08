@@ -144,6 +144,28 @@ async function processQueue() {
     }
 }
 
+function injectVoiceMetadata(markdown) {
+    if (!markdown || !markdown.startsWith('---')) return markdown;
+    const secondDashes = markdown.indexOf('---', 3);
+    if (secondDashes === -1) return markdown;
+
+    let frontmatter = markdown.slice(3, secondDashes);
+    const rest = markdown.slice(secondDashes);
+
+    // tags の直下に - voice-memo を挿入
+    if (/tags:\s*\n/.test(frontmatter)) {
+        frontmatter = frontmatter.replace(/tags:\s*\n/, 'tags:\n  - voice-memo\n');
+    } else {
+        frontmatter += '\ntags:\n  - voice-memo';
+    }
+
+    if (!/source:/.test(frontmatter)) {
+        frontmatter += '\nsource: voice-input';
+    }
+
+    return `---${frontmatter}${rest}`;
+}
+
 // ----------------------------------------------------
 // 🎙️ 音声思考ログ・文字起こしモジュールの初期化
 // ----------------------------------------------------
@@ -151,23 +173,41 @@ const voiceTranscriber = new VoiceTranscriber(client, {
     voiceChannelId: VOICE_CHANNEL_ID,
     outputChannelId: TRANSCRIPT_CHANNEL_ID,
     onTranscribeComplete: async (formattedText, meta) => {
-        if (!SYNC_THOUGHT_TO_OBSIDIAN) return;
-
-        console.log('🧠 思考ログをObsidianに自動連携・保存します...');
+        console.log('🧠 音声思考生ログをObsidianに自動連携・構造化して保存します...');
         taskQueue.push(async () => {
             try {
+                const targetChannelId = TRANSCRIPT_CHANNEL_ID || VOICE_CHANNEL_ID;
+                const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+
+                // 1. Vaultから既存の概念リンクを自動収集
                 const existingConcepts = await getExistingConceptsFromVault();
-                const markdownContent = await analyzeThoughtMemo(formattedText, existingConcepts);
+                console.log(`🔗 参照概念数: ${existingConcepts.length} 件`);
+
+                // 2. 自動判別とMarkdown生成
+                let markdownContent = await analyzeThoughtMemo(formattedText, existingConcepts);
+                markdownContent = injectVoiceMetadata(markdownContent);
                 const cleanTitle = extractFilenameFromMarkdown(markdownContent, `音声思考メモ_${meta.userName}`);
 
+                // 3. Vaultへ保存
                 await fs.mkdir(MEMO_SAVE_DIR, { recursive: true });
                 const filepath = path.join(MEMO_SAVE_DIR, `${cleanTitle}.md`);
                 await fs.writeFile(filepath, markdownContent, 'utf8');
                 console.log(`📝 音声思考ログのVault保存完了: ${filepath}`);
 
-                await syncToGit(`Add voice thought memo: ${cleanTitle}`);
+                // 4. Git同期
+                await syncToGit(`Add voice memo: ${cleanTitle}`);
+
+                // 5. Discordへ完了通知
+                if (channel) {
+                    await channel.send(`💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`);
+                }
             } catch (err) {
                 console.error('音声思考ログのObsidian保存エラー:', err);
+                const targetChannelId = TRANSCRIPT_CHANNEL_ID || VOICE_CHANNEL_ID;
+                const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+                if (channel) {
+                    await channel.send('⚠️ Obsidianへの構造化・保存処理中にエラーが発生しました。詳細はログをご確認ください。').catch(() => {});
+                }
             }
         });
         processQueue();
