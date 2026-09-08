@@ -23,6 +23,7 @@ const PROMPTER_PORT = process.env.PROMPTER_PORT || '3333';
 
 const VAULT_ROOT_DIR = process.env.VAULT_PATH || '/home/tnuma/my-vault';
 const MEMO_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox');
+const BREWING_SAVE_DIR = path.join(MEMO_SAVE_DIR, 'brewing');
 const RESEARCH_SAVE_DIR = path.join(VAULT_ROOT_DIR, '00_Inbox/Nanshindo');
 // ==========================================
 
@@ -167,6 +168,70 @@ function injectVoiceMetadata(markdown) {
 }
 
 // ----------------------------------------------------
+// ☕ 発酵完了（status: brewed）メモの自動昇華処理
+// ----------------------------------------------------
+async function processBrewedNotes(triggerChannel = null) {
+    try {
+        await fs.mkdir(BREWING_SAVE_DIR, { recursive: true });
+        const files = await fs.readdir(BREWING_SAVE_DIR);
+        const mdFiles = files.filter(f => f.endsWith('.md'));
+
+        let processedCount = 0;
+
+        for (const file of mdFiles) {
+            const filepath = path.join(BREWING_SAVE_DIR, file);
+            const content = await fs.readFile(filepath, 'utf8');
+
+            // status: brewed （または ready, done）を検知
+            const statusMatch = content.match(/^status:\s*["']?([^"'\r\n]+)["']?/m);
+            const status = statusMatch ? statusMatch[1].trim().toLowerCase() : '';
+
+            if (status === 'brewed' || status === 'ready' || status === 'done') {
+                console.log(`☕ 発酵完了（status: ${status}）を検知: ${file}`);
+                processedCount++;
+
+                const cleanName = path.basename(file, '.md');
+                const inputForAsset = `【元メモ・生ログおよび追記内容】:\n${content}`;
+
+                // 概念リンクを収集して thought-asset として再生成
+                const existingConcepts = await getExistingConceptsFromVault();
+                let newMarkdown = await analyzeThoughtMemo(inputForAsset, existingConcepts);
+
+                // 元のメモに voice-memo があれば引き継ぐ
+                if (content.includes('voice-memo')) {
+                    newMarkdown = injectVoiceMetadata(newMarkdown);
+                }
+
+                const newTitle = extractFilenameFromMarkdown(newMarkdown, cleanName);
+                const destPath = path.join(MEMO_SAVE_DIR, `${newTitle}.md`);
+
+                // 00_Inbox 直下に保存
+                await fs.writeFile(destPath, newMarkdown, 'utf8');
+                console.log(`📝 正規構造化メモとして保存: ${destPath}`);
+
+                // 元の brewing ファイルを削除
+                await fs.unlink(filepath);
+                console.log(`🗑️ 未発酵メモを削除: ${filepath}`);
+
+                // Git 同期
+                await syncToGit(`Brew memo: ${newTitle} (sublimated from ${file})`);
+
+                // Discord 通知
+                const targetChannel = triggerChannel || (TRANSCRIPT_CHANNEL_ID ? await client.channels.fetch(TRANSCRIPT_CHANNEL_ID).catch(() => null) : null);
+                if (targetChannel) {
+                    await targetChannel.send(`☕ **${newTitle}** が発酵完了（\`status: brewed\`）し、正規の構造化メモ（00_Inbox）に昇華されました！`);
+                }
+            }
+        }
+
+        return processedCount;
+    } catch (err) {
+        console.error('[processBrewedNotes Error]:', err);
+        return 0;
+    }
+}
+
+// ----------------------------------------------------
 // 🎙️ 音声思考ログ・文字起こしモジュールの初期化
 // ----------------------------------------------------
 const voiceTranscriber = new VoiceTranscriber(client, {
@@ -188,18 +253,22 @@ const voiceTranscriber = new VoiceTranscriber(client, {
                 markdownContent = injectVoiceMetadata(markdownContent);
                 const cleanTitle = extractFilenameFromMarkdown(markdownContent, `音声思考メモ_${meta.userName}`);
 
-                // 3. Vaultへ保存
-                await fs.mkdir(MEMO_SAVE_DIR, { recursive: true });
-                const filepath = path.join(MEMO_SAVE_DIR, `${cleanTitle}.md`);
+                // 3. Vaultへ保存（未発酵なら brewing フォルダ、完成形なら Inbox 直下）
+                const isSeed = /type:\s*thought-seed/.test(markdownContent);
+                const targetSaveDir = isSeed ? BREWING_SAVE_DIR : MEMO_SAVE_DIR;
+                await fs.mkdir(targetSaveDir, { recursive: true });
+                const filepath = path.join(targetSaveDir, `${cleanTitle}.md`);
                 await fs.writeFile(filepath, markdownContent, 'utf8');
                 console.log(`📝 音声思考ログのVault保存完了: ${filepath}`);
 
+                // 4. Git同期
+                await syncToGit(isSeed ? `Add thought-seed (brewing): ${cleanTitle}` : `Add voice memo: ${cleanTitle}`);
+
                 // 5. Discordへ完了通知
                 if (channel) {
-                    const isSeed = /type:\s*thought-seed/.test(markdownContent);
                     const notifyMsg = isSeed
-                        ? `🌱 **${cleanTitle}** を「未発酵の思考の種」としてObsidianに保存しました！`
-                        : `💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`;
+                        ? `🌱 **${cleanTitle}** を「未発酵メモ（00_Inbox/brewing）」として保存しました！\n💡 Obsidianで発酵スペースに追記し、\`status: brewed\` にすると正規メモに自動昇華されます。`
+                        : `💡 **${cleanTitle}** を分類・構造化してObsidian（00_Inbox）に保存しました！`;
                     await channel.send(notifyMsg);
                 }
             } catch (err) {
@@ -219,6 +288,11 @@ client.once('clientReady', () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     console.log('🚀 Nanshindo Multi-Triage Bot is online.');
     voiceTranscriber.init();
+
+    // 1分ごとに brewing フォルダ内の status: brewed をチェック
+    setInterval(() => {
+        processBrewedNotes().catch(() => {});
+    }, 60 * 1000);
 });
 
 client.on('messageCreate', async (message) => {
@@ -254,6 +328,33 @@ client.on('messageCreate', async (message) => {
             return message.reply('🎙️ 録音を終了し、思考ログの文字起こし・整形を開始します...');
         } else {
             return message.reply('⚠️ 現在ボイスチャンネルに接続していません。');
+        }
+    }
+
+    // ----------------------------------------------------
+    // ☕ 発酵メモ手動昇華・一覧コマンド (!brew / !brewing / !seeds)
+    // ----------------------------------------------------
+    if (trimmed === '!brew' || trimmed === '!brewed') {
+        const count = await processBrewedNotes(message.channel);
+        if (count === 0) {
+            return message.reply('ℹ️ 現在 `status: brewed` になっているメモはありませんでした。\nObsidianで未発酵メモ（`00_Inbox/brewing/`）のフロントマターを `status: brewed` に変更してから再度お試しください。');
+        } else {
+            return message.reply(`☕ ${count} 件のメモを発酵（brewed）し、正規構造化メモ（00_Inbox）へ昇華しました！`);
+        }
+    }
+
+    if (trimmed === '!brewing' || trimmed === '!seeds') {
+        try {
+            await fs.mkdir(BREWING_SAVE_DIR, { recursive: true });
+            const files = await fs.readdir(BREWING_SAVE_DIR);
+            const mdFiles = files.filter(f => f.endsWith('.md'));
+            if (mdFiles.length === 0) {
+                return message.reply('🌱 現在発酵中（00_Inbox/brewing）のメモはありません。');
+            }
+            const listText = mdFiles.map((f, i) => `${i + 1}. **${f.replace('.md', '')}**`).join('\n');
+            return message.reply(`🌱 **現在発酵中（00_Inbox/brewing）のメモ一覧 (${mdFiles.length}件)**:\n${listText}\n\n💡 Obsidianで発酵スペースに追記し、\`status: brewed\` に書き換えると自動で正規メモに昇華されます。`);
+        } catch (e) {
+            return message.reply('⚠️ brewingフォルダの取得に失敗しました。');
         }
     }
 
@@ -373,23 +474,24 @@ client.on('messageCreate', async (message) => {
                 const markdownContent = await analyzeThoughtMemo(inputContent, existingConcepts);
                 const cleanTitle = extractFilenameFromMarkdown(markdownContent, 'メモ');
  
-                // 3. Vaultへ保存
-                await fs.mkdir(MEMO_SAVE_DIR, { recursive: true });
-                const filepath = path.join(MEMO_SAVE_DIR, `${cleanTitle}.md`);
+                // 3. Vaultへ保存（未発酵なら brewing フォルダ、完成形なら Inbox 直下）
+                const isSeed = /type:\s*thought-seed/.test(markdownContent);
+                const targetSaveDir = isSeed ? BREWING_SAVE_DIR : MEMO_SAVE_DIR;
+                await fs.mkdir(targetSaveDir, { recursive: true });
+                const filepath = path.join(targetSaveDir, `${cleanTitle}.md`);
                 await fs.writeFile(filepath, markdownContent, 'utf8');
                 console.log(`📝 保存完了: ${filepath}`);
- 
+
                 // 4. Git同期
-                await syncToGit(`Add memo: ${cleanTitle}`);
- 
+                await syncToGit(isSeed ? `Add thought-seed (brewing): ${cleanTitle}` : `Add memo: ${cleanTitle}`);
+
                 if (waitReaction) {
                     try { await waitReaction.users.remove(client.user.id); } catch (_) {}
                 }
                 await message.react('✅');
-                const isSeed = /type:\s*thought-seed/.test(markdownContent);
                 const replyMsg = isSeed
-                    ? `🌱 **${cleanTitle}** を「未発酵の思考の種」としてObsidianに保存しました！`
-                    : `💡 **${cleanTitle}** を分類・構造化してObsidianに保存しました！`;
+                    ? `🌱 **${cleanTitle}** を「未発酵メモ（00_Inbox/brewing）」として保存しました！\n💡 Obsidianで発酵スペースに追記し、\`status: brewed\` にすると正規メモに自動昇華されます。`
+                    : `💡 **${cleanTitle}** を分類・構造化してObsidian（00_Inbox）に保存しました！`;
                 await message.reply(replyMsg);
  
             } catch (error) {
