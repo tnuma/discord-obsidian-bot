@@ -9,6 +9,7 @@ const execPromise = util.promisify(exec);
 const { fetchProductResearch, analyzeThoughtMemo } = require('./researcher');
 const { scanActiveProjects } = require('./ship_target_analyzer');
 const { VoiceTranscriber } = require('./voiceTranscriber');
+const matter = require('gray-matter');
 
 // ==========================================
 // ⚙️ 設定エリア
@@ -146,25 +147,32 @@ async function processQueue() {
 }
 
 function injectVoiceMetadata(markdown) {
-    if (!markdown || !markdown.startsWith('---')) return markdown;
-    const secondDashes = markdown.indexOf('---', 3);
-    if (secondDashes === -1) return markdown;
+    if (!markdown) return markdown;
+    try {
+        const parsed = matter(markdown);
+        if (!parsed.data) parsed.data = {};
 
-    let frontmatter = markdown.slice(3, secondDashes);
-    const rest = markdown.slice(secondDashes);
+        // tags の処理（重複なく voice-memo を先頭に追加）
+        if (!parsed.data.tags) {
+            parsed.data.tags = ['voice-memo'];
+        } else if (Array.isArray(parsed.data.tags)) {
+            if (!parsed.data.tags.includes('voice-memo')) {
+                parsed.data.tags.unshift('voice-memo');
+            }
+        } else if (typeof parsed.data.tags === 'string') {
+            parsed.data.tags = ['voice-memo', parsed.data.tags];
+        }
 
-    // tags の直下に - voice-memo を挿入
-    if (/tags:\s*\n/.test(frontmatter)) {
-        frontmatter = frontmatter.replace(/tags:\s*\n/, 'tags:\n  - voice-memo\n');
-    } else {
-        frontmatter += '\ntags:\n  - voice-memo';
+        // source の処理
+        if (!parsed.data.source) {
+            parsed.data.source = 'voice-input';
+        }
+
+        return matter.stringify(parsed.content, parsed.data);
+    } catch (e) {
+        console.error('injectVoiceMetadata error:', e);
+        return markdown;
     }
-
-    if (!/source:/.test(frontmatter)) {
-        frontmatter += '\nsource: voice-input';
-    }
-
-    return `---${frontmatter}${rest}`;
 }
 
 // ----------------------------------------------------
