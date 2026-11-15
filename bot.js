@@ -10,6 +10,7 @@ const { fetchProductResearch, analyzeThoughtMemo } = require('./researcher');
 const { scanActiveProjects } = require('./ship_target_analyzer');
 const { VoiceTranscriber } = require('./voiceTranscriber');
 const matter = require('gray-matter');
+const linkCollector = require('./linkCollector');
 
 // ==========================================
 // ⚙️ 設定エリア
@@ -19,6 +20,8 @@ const MEMO_CHANNEL_ID = process.env.MEMO_CHANNEL_ID;
 const RESEARCH_CHANNEL_ID = process.env.RESEARCH_CHANNEL_ID;
 const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID;
 const TRANSCRIPT_CHANNEL_ID = process.env.TRANSCRIPT_CHANNEL_ID;
+const LINK_NSFW_CHANNEL_ID = process.env.LINK_NSFW_CHANNEL_ID;
+const LINK_CONTENT_CHANNEL_ID = process.env.LINK_CONTENT_CHANNEL_ID;
 const SYNC_THOUGHT_TO_OBSIDIAN = process.env.SYNC_THOUGHT_TO_OBSIDIAN === 'true';
 const PROMPTER_PORT = process.env.PROMPTER_PORT || '3333';
 
@@ -303,6 +306,43 @@ client.once('clientReady', () => {
     }, 60 * 1000);
 });
 
+// ----------------------------------------------------
+// 🔘 ボタン操作ハンドラ（リンク収集の保存・キャンセル）
+// ----------------------------------------------------
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+
+    if (interaction.customId.startsWith('link_save_')) {
+        const threadId = interaction.customId.replace('link_save_', '');
+        const session = linkCollector.getSession(threadId);
+        if (!session) {
+            return interaction.reply({ content: 'ℹ️ この記録セッションは既に保存済みまたは終了しています。', ephemeral: true });
+        }
+        await interaction.deferUpdate();
+        await interaction.editReply({ components: [] }).catch(() => {});
+        await linkCollector.finalizeSession(interaction.channel, session, {
+            vaultRootDir: VAULT_ROOT_DIR,
+            syncToGit,
+            taskQueue,
+            processQueue,
+        });
+        return;
+    }
+
+    if (interaction.customId.startsWith('link_cancel_')) {
+        const threadId = interaction.customId.replace('link_cancel_', '');
+        const session = linkCollector.getSession(threadId);
+        if (!session) {
+            return interaction.reply({ content: 'ℹ️ この記録セッションは既に終了しています。', ephemeral: true });
+        }
+        linkCollector.deleteSession(threadId);
+        await interaction.deferUpdate();
+        await interaction.editReply({ components: [] }).catch(() => {});
+        await interaction.channel.send('🗑️ 記録をキャンセルしました。');
+        return;
+    }
+});
+
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
@@ -416,6 +456,44 @@ client.on('messageCreate', async (message) => {
             await message.reply('⚠️ プロンプターURLの生成中にエラーが発生しました。');
             return;
         }
+    }
+
+    // ----------------------------------------------------
+    // ③ リンク・スクショ対話型収集 (NSFW用 / コンテンツ制作用)
+    // ----------------------------------------------------
+    if (message.channel.isThread() && linkCollector.hasSession(message.channelId)) {
+        try {
+            await linkCollector.handleThreadReply(message, {
+                vaultRootDir: VAULT_ROOT_DIR,
+                syncToGit,
+                taskQueue,
+                processQueue,
+            });
+        } catch (err) {
+            console.error('Link thread reply error:', err);
+            await message.reply('⚠️ 対話処理中にエラーが発生しました。');
+        }
+        return;
+    }
+
+    if (LINK_NSFW_CHANNEL_ID && message.channelId === LINK_NSFW_CHANNEL_ID) {
+        try {
+            await linkCollector.startLinkSession(message, 'nsfw');
+        } catch (err) {
+            console.error('Link NSFW start error:', err);
+            await message.reply('⚠️ リンク記録セッションの開始に失敗しました。');
+        }
+        return;
+    }
+
+    if (LINK_CONTENT_CHANNEL_ID && message.channelId === LINK_CONTENT_CHANNEL_ID) {
+        try {
+            await linkCollector.startLinkSession(message, 'content');
+        } catch (err) {
+            console.error('Link Content start error:', err);
+            await message.reply('⚠️ リンク記録セッションの開始に失敗しました。');
+        }
+        return;
     }
 
     // ----------------------------------------------------
